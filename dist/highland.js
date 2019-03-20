@@ -1496,7 +1496,7 @@ Stream.prototype._writeOutgoing = function _writeOutgoing(token) {
         return;
     }
 
-    if (this._nil_pushed) {
+    if (this._nil_pushed && token !== _.nil) {
         throw new Error('Cannot write to stream after nil');
     }
 
@@ -2316,22 +2316,22 @@ addMethod('toNodeStream', function (options) {
  * }); // => 2, 4, 6, 8
  *
  * Returning nil ends the stream, so you can avoid further
- * processing when values statisfy a given condition and 
+ * processing when values statisfy a given condition and
  * stop generators without breaking encapsulation.
- *  
- * function integers() { 
- *     var cnt=0; 
+ *
+ * function integers() {
+ *     var cnt=0;
  *     return _(function (push,next) { push(null, cnt++); next(); })
  * } // a generator => 0, 1, 2, ... (forever)
  *
  * function httpFetch(idx,opt) {
  *    return _( fetch(urlPrefix+idx,opt).then(function (res) {
- *        return (res.ok) ? res.text() : _.nil; 
+ *        return (res.ok) ? res.text() : _.nil;
  *    }));
  * } // => a Promise or nil
  *
- * var docs = integers().map(httpFetch).series() 
- *     // => contents for doc0, doc1, ... until the first 404-not-found 
+ * var docs = integers().map(httpFetch).series()
+ *     // => contents for doc0, doc1, ... until the first 404-not-found
  *
  */
 
