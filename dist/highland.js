@@ -1,5 +1,88 @@
 (function(f){if(typeof exports==="object"&&typeof module!=="undefined"){module.exports=f()}else if(typeof define==="function"&&define.amd){define([],f)}else{var g;if(typeof window!=="undefined"){g=window}else if(typeof global!=="undefined"){g=global}else if(typeof self!=="undefined"){g=self}else{g=this}g.highland = f()}})(function(){var define,module,exports;return (function(){function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s}return e})()({1:[function(require,module,exports){
-(function (process,global){
+var isFunction = require('./isFunction');
+
+/**
+ * Coerce observer callbacks into observer object or return observer object
+ * if already created. Will throw an error if both an object and callback args
+ * are provided.
+ *
+ * @id createObserver
+ * @param {function|object} onNext Function to receive new values or observer
+ * @param {function} [onError] Optional callback to receive errors.
+ * @param {function} [onComplete] Optional callback when stream completes
+ * @return {object} Observer object with next, error, and complete methods
+ * @private
+ *
+ * createObserver(
+ *     function (x) { console.log(x); },
+ *     function (err) { console.error(err); },
+ *     function () { console.log('done'); }
+ * )
+ *
+ * createObserver(
+ *     null,
+ *     null,
+ *     function () { console.log('done'); }
+ * )
+ *
+ * createObserver({
+ *     next: function (x) { console.log(x); },
+ *     error: function (err) { console.error(err); },
+ *     complete: function () { console.log('done'); }
+ * })
+ */
+function createObserver (onNext, onError, onComplete) {
+    var isObserver = onNext && !isFunction(onNext) && typeof onNext === 'object';
+
+    // ensure if we have an observer that we don't also have callbacks. Users
+    // must choose one.
+    if (isObserver && (onError || onComplete)) {
+        throw new Error('Subscribe requires either an observer object or optional callbacks.');
+    }
+
+    // onNext is actually an observer
+    if (isObserver) {
+        return onNext;
+    }
+
+    // Otherwise create an observer object
+    return {
+        next: onNext,
+        error: onError,
+        complete: onComplete,
+    };
+}
+
+module.exports = createObserver;
+
+},{"./isFunction":5}],2:[function(require,module,exports){
+(function (global){
+/**
+ * Return a global context upon which to install Highland globals. Takes a
+ * default namespace to use if both the node global and browser window
+ * namespace cannot be found.
+ *
+ * @returns {object} Global namespace context
+ */
+
+// Use the nodejs global namespace
+if (typeof global !== 'undefined') {
+    module.exports = global;
+}
+// Use the browser window namespace
+else if (typeof window !== 'undefined') {
+    module.exports = window;
+}
+// If neither the global namespace or browser namespace is avaiable
+// Use this module as the default context
+else {
+    module.exports = this;
+}
+
+
+}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
+},{}],3:[function(require,module,exports){
+(function (process){
 /**
  * Highland: the high-level streams library
  *
@@ -14,7 +97,10 @@ var inherits = require('util').inherits;
 var EventEmitter = require('events').EventEmitter;
 var Decoder = require('string_decoder').StringDecoder;
 
+var createObserver = require('./createObserver');
+var isFunction = require('./isFunction');
 var IntMap = require('./intMap');
+var ObservableSubscription = require('./observableSubscription');
 var Queue = require('./queue');
 var ReadableProxy = require('./readableProxy');
 
@@ -23,13 +109,7 @@ var slice = Array.prototype.slice;
 var hasOwn = Object.prototype.hasOwnProperty;
 
 // Set up the global object.
-var _global = this;
-if (typeof global !== 'undefined') {
-    _global = global;
-}
-else if (typeof window !== 'undefined') {
-    _global = window;
-}
+var _global = require('./global');
 
 // ES5 detected value, used for switch between ES5 and ES3 code
 var isES5 = (function () {
@@ -319,9 +399,7 @@ _.isUndefined = function (x) {
     return typeof x === 'undefined';
 };
 
-_.isFunction = function (x) {
-    return typeof x === 'function';
-};
+_.isFunction = isFunction;
 
 _.isObject = function (x) {
     return typeof x === 'object' && x !== null;
@@ -384,10 +462,7 @@ else {
 
 // set up a global nil object in cases where you have multiple Highland
 // instances installed (often via npm)
-if (!_global.nil) {
-    _global.nil = {};
-}
-var nil = _.nil = _global.nil;
+var nil = _.nil = require('./nil');
 
 /**
  * Transforms a function with specific arity (all arguments must be
@@ -2112,6 +2187,98 @@ addMethod('toPromise', function (PromiseCtor) {
 
 
 /**
+ * Consumes values using the Observable subscribe signature. Unlike other
+ * consumption methods, subscribe can be called multiple times. Each
+ * subscription will receive the current value before receiving the next value.
+ * Subscribing to an already consumed stream will result in an error.
+ *
+ * Implements the Observable subscribe functionality as defined by the spec:
+ * https://tc39.github.io/proposal-observable/#observable-prototype-subscribe
+ *
+ * @id subscribe
+ * @section Consumption
+ * @name Stream.subscribe(onNext, onError, onComplete)
+ * @param {Function|object|null} onNext - Handler for next value or observer
+ * @param {Function|null} onError - Handler function for errors.
+ * @param {Function|null} onCompleted - Handler Function when stream is done.
+ * @returns {ObservableSubscription} - Subscription with unsubscribed method
+ * @api public
+ *
+ * // with callbacks
+ * _([1, 2, 3, 4]).subscribe(
+ *     function onNext (x) {
+ *         // Called for each value that comes downstream
+ *         console.log('Received onNext value', x);
+ *     },
+ *     function onError (err) {
+ *         // Called one time with error or zero if no errors occur upstream
+ *         console.error('Single highland stream error', err);
+ *     },
+ *     function onComplete () {
+ *         // Receives no arguments
+ *         // Called only once when stream is completed.
+ *         console.log('Completed!');
+ *     }
+ * );
+ *
+ * // with an observer
+ * _([1, 2, 3, 4]).subscribe({
+ *     next (x) {
+ *         console.log('Received next value', x);
+ *     },
+ *     error (err) {
+ *         console.error('An error occurred upstream', err);
+ *     },
+ *     complete () {
+ *         console.log('Completed!')
+ *     }
+ * });
+ */
+
+addMethod('subscribe', function (onNext, onError, onComplete) {
+    var observer = createObserver(onNext, onError, onComplete);
+
+    return new ObservableSubscription(this, observer);
+});
+
+/*
+ * Create a variable we can use as a dynamic method name depending on the
+ * environment.
+ *
+ * If Symbols are available get the observable symbol. Otherwise use the a
+ * fallback string.
+ * https://tc39.github.io/proposal-observable/#observable-prototype-@@observable
+ *
+ * Source taken from RxJS
+ * https://github.com/ReactiveX/rxjs/commit/4a5aaafc99825ae9b61e410bc0b5e86c7ae75837#diff-d26bc4881b94c82f3c0ae7d3914e9577R13
+ */
+/* eslint-disable no-undef */
+var observable = typeof Symbol === 'function' && Symbol.observable || '@@observable';
+/* eslint-enable no-undef */
+
+/**
+ * Returns an Observable spec-compliant instance (itself) that has a subscribe
+ * method and a Symbol.observable method. If Symbol is not available in the
+ * current environment it defaults to '@@observable'. Used by other tools and
+ * libraries that want to get an observable spec compliant stream interface.
+ *
+ * https://tc39.github.io/proposal-observable/#observable-prototype-@@observable
+ *
+ * @id Symbol.observable
+ * @section Consumption
+ * @name Symbol.observable
+ * @api public
+ *
+ * _([1, 2, 3])[Symbol.observable || "@@observable"]().subscribe(x => {
+ *     console.log("Received value", x);
+ * });
+ */
+
+addMethod(observable, function () {
+    return this;
+});
+
+/**
  * Converts the stream to a node Readable Stream for use in methods
  * or pipes that depend on the native stream type.
  *
@@ -2147,6 +2314,25 @@ addMethod('toNodeStream', function (options) {
  * var doubled = _([1, 2, 3, 4]).map(function (x) {
  *     return x * 2;
  * }); // => 2, 4, 6, 8
+ *
+ * Returning nil ends the stream, so you can avoid further
+ * processing when values statisfy a given condition and 
+ * stop generators without breaking encapsulation.
+ *  
+ * function integers() { 
+ *     var cnt=0; 
+ *     return _(function (push,next) { push(null, cnt++); next(); })
+ * } // a generator => 0, 1, 2, ... (forever)
+ *
+ * function httpFetch(idx,opt) {
+ *    return _( fetch(urlPrefix+idx,opt).then(function (res) {
+ *        return (res.ok) ? res.text() : _.nil; 
+ *    }));
+ * } // => a Promise or nil
+ *
+ * var docs = integers().map(httpFetch).series() 
+ *     // => contents for doc0, doc1, ... until the first 404-not-found 
+ *
  */
 
 addMethod('map', function (f) {
@@ -2170,7 +2356,9 @@ addMethod('map', function (f) {
                 fnErr = e;
             }
             push(fnErr, fnVal);
-            next();
+            if (fnVal !== nil) {
+                next();
+            }
         }
     });
 });
@@ -5172,8 +5360,8 @@ _.not = function (x) {
     return !x;
 };
 
-}).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./intMap":2,"./queue":3,"./readableProxy":4,"_process":16,"events":7,"string_decoder":8,"util":36}],2:[function(require,module,exports){
+}).call(this,require('_process'))
+},{"./createObserver":1,"./global":2,"./intMap":4,"./isFunction":5,"./nil":6,"./observableSubscription":7,"./queue":8,"./readableProxy":9,"_process":21,"events":12,"string_decoder":13,"util":41}],4:[function(require,module,exports){
 (function (global){
 var hasOwn = Object.prototype.hasOwnProperty;
 
@@ -5228,7 +5416,154 @@ else {
 }
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],3:[function(require,module,exports){
+},{}],5:[function(require,module,exports){
+/**
+ * Predicate function takes a value and returns true if it is a function.
+ *
+ * @id isFunction
+ * @name isFunction(x)
+ * @param {any} x - Any value to test against
+ * @returns {bool} True if x is a function
+ */
+
+function isFunction (x) {
+    return typeof x === 'function';
+}
+
+module.exports = isFunction;
+
+},{}],6:[function(require,module,exports){
+var _global = require('./global');
+
+/*
+ * Resolve nil value from global namespace if it exists. This may happen when
+ * there are multiple versions of highland (like npm).
+ *
+ * nil is only equal to itself:
+ *
+ * nil === {}  => false
+ * nil === nil => true
+ *
+ * This property makes it valuable for determining a lack of input from a
+ * falsey value such as nil or undefined. When a highland stream encounters
+ * nil it knows for sure the intention is to end the stream.
+ */
+
+if (!_global.nil) {
+    _global.nil = {};
+}
+
+module.exports = _global.nil;
+
+},{"./global":2}],7:[function(require,module,exports){
+var nil = require('./nil');
+
+/**
+ * An implementation of the TC39 Subscription object
+ * https://tc39.github.io/proposal-observable/#subscription-objects
+ *
+ * This class is intended for internal use only.
+ *
+ * Constructor takes a source highland stream, and an observer object with
+ * an optional next, error, and complete methods.
+ *
+ * Returns a subscription object with a closed boolean and unsubscribe
+ * method.
+ *
+ * @id ObservableSubscription
+ * @name ObservableSubscription
+ * @param {stream} stream - Highland stream to subscribe to
+ * @param {object} observer - Observer to publish from stream subscription
+ * @api private
+ */
+function ObservableSubscription (stream, observer) {
+    var self = this;
+
+    // Set attributes
+    this._source = stream.fork();
+    this.closed = false;
+
+    // Don't let users subscribe to an already completed stream
+    if (stream.ended) {
+        if (observer.error) {
+            observer.error(new Error('Subscribe called on an already completed stream.'));
+        }
+
+        this._cleanup();
+
+        return;
+    }
+
+    // Consume the stream and emit data to the observer
+    this._source = this._source.consume(function (err, x, push, next) {
+        if (err) {
+            push(null, nil);
+            if (observer.error) {
+                observer.error(err);
+            }
+            self._cleanup();
+        }
+        else if (x === nil) {
+            if (observer.complete) {
+                observer.complete();
+            }
+            self._cleanup();
+        }
+        else {
+            if (observer.next) {
+                observer.next(x);
+            }
+            next();
+        }
+    });
+
+    this._source.resume();
+}
+
+// Instance Methods
+
+/**
+ * Perform cleanup routine on a subscription. This can only be called once per
+ * subscription. Once its closed the subscription cannot be cleaned up again.
+ *
+ * Note: This relies heavily upon side-effects and mutates itself.
+ *
+ * @id ObservableSubscription.prototype._cleanup(subscription)
+ * @name ObservableSubscription.prototype._cleanup
+ * @returns {undefined} Side-effectful function cleans up subscription
+ * @api private
+ */
+
+ObservableSubscription.prototype._cleanup = function cleanup () {
+    // Don't want to destroy\cleanup an already closed stream
+    if (this.closed) {
+        return;
+    }
+    this._source = null;
+    this.closed = true;
+};
+
+/**
+ * Destroy the stream resources and cleanup the subscription.
+ * @id ObservableSubscription.prototype.unsubscribe()
+ * @name ObservableSubscription.prototype.unsubscribe()
+ * @returns {undefined} Side-effectful. Destroys stream and cleans up subscription.
+ * @api private
+ */
+
+ObservableSubscription.prototype.unsubscribe = function unsubscribe () {
+    // Don't want to destroy\cleanup an already closed stream
+    if (this.closed) {
+        return;
+    }
+
+    this._source.destroy();
+    this._cleanup();
+};
+
+module.exports = ObservableSubscription;
+
+},{"./nil":6}],8:[function(require,module,exports){
 function Queue() {
     this._in = [];
     this._out = [];
@@ -5285,7 +5620,7 @@ Queue.prototype.toString = function toString() {
 
 module.exports = Queue;
 
-},{}],4:[function(require,module,exports){
+},{}],9:[function(require,module,exports){
 var inherits = require('util').inherits;
 var Readable = require('stream').Readable;
 
@@ -5330,7 +5665,7 @@ ReadableProxy.prototype._read = function (ignore) {
 
 module.exports = ReadableProxy;
 
-},{"stream":32,"util":36}],5:[function(require,module,exports){
+},{"stream":37,"util":41}],10:[function(require,module,exports){
 'use strict'
 
 exports.byteLength = byteLength
@@ -5448,9 +5783,9 @@ function fromByteArray (uint8) {
   return parts.join('')
 }
 
-},{}],6:[function(require,module,exports){
+},{}],11:[function(require,module,exports){
 
-},{}],7:[function(require,module,exports){
+},{}],12:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -5975,7 +6310,7 @@ function functionBindPolyfill(context) {
   };
 }
 
-},{}],8:[function(require,module,exports){
+},{}],13:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -6272,7 +6607,7 @@ function simpleWrite(buf) {
 function simpleEnd(buf) {
   return buf && buf.length ? this.write(buf) : '';
 }
-},{"safe-buffer":31}],9:[function(require,module,exports){
+},{"safe-buffer":36}],14:[function(require,module,exports){
 /*!
  * The buffer module from node.js, for the browser.
  *
@@ -8051,7 +8386,7 @@ function numberIsNaN (obj) {
   return obj !== obj // eslint-disable-line no-self-compare
 }
 
-},{"base64-js":5,"ieee754":11}],10:[function(require,module,exports){
+},{"base64-js":10,"ieee754":16}],15:[function(require,module,exports){
 (function (Buffer){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -8162,7 +8497,7 @@ function objectToString(o) {
 }
 
 }).call(this,{"isBuffer":require("../../is-buffer/index.js")})
-},{"../../is-buffer/index.js":13}],11:[function(require,module,exports){
+},{"../../is-buffer/index.js":18}],16:[function(require,module,exports){
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m
   var eLen = (nBytes * 8) - mLen - 1
@@ -8248,7 +8583,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   buffer[offset + i - d] |= s * 128
 }
 
-},{}],12:[function(require,module,exports){
+},{}],17:[function(require,module,exports){
 if (typeof Object.create === 'function') {
   // implementation from standard node.js 'util' module
   module.exports = function inherits(ctor, superCtor) {
@@ -8273,7 +8608,7 @@ if (typeof Object.create === 'function') {
   }
 }
 
-},{}],13:[function(require,module,exports){
+},{}],18:[function(require,module,exports){
 /*!
  * Determine if an object is a Buffer
  *
@@ -8296,14 +8631,14 @@ function isSlowBuffer (obj) {
   return typeof obj.readFloatLE === 'function' && typeof obj.slice === 'function' && isBuffer(obj.slice(0, 0))
 }
 
-},{}],14:[function(require,module,exports){
+},{}],19:[function(require,module,exports){
 var toString = {}.toString;
 
 module.exports = Array.isArray || function (arr) {
   return toString.call(arr) == '[object Array]';
 };
 
-},{}],15:[function(require,module,exports){
+},{}],20:[function(require,module,exports){
 (function (process){
 'use strict';
 
@@ -8351,7 +8686,7 @@ function nextTick(fn, arg1, arg2, arg3) {
 
 
 }).call(this,require('_process'))
-},{"_process":16}],16:[function(require,module,exports){
+},{"_process":21}],21:[function(require,module,exports){
 // shim for using process in browser
 var process = module.exports = {};
 
@@ -8537,10 +8872,10 @@ process.chdir = function (dir) {
 };
 process.umask = function() { return 0; };
 
-},{}],17:[function(require,module,exports){
+},{}],22:[function(require,module,exports){
 module.exports = require('./lib/_stream_duplex.js');
 
-},{"./lib/_stream_duplex.js":18}],18:[function(require,module,exports){
+},{"./lib/_stream_duplex.js":23}],23:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -8665,7 +9000,7 @@ function forEach(xs, f) {
     f(xs[i], i);
   }
 }
-},{"./_stream_readable":20,"./_stream_writable":22,"core-util-is":10,"inherits":12,"process-nextick-args":15}],19:[function(require,module,exports){
+},{"./_stream_readable":25,"./_stream_writable":27,"core-util-is":15,"inherits":17,"process-nextick-args":20}],24:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -8713,7 +9048,7 @@ function PassThrough(options) {
 PassThrough.prototype._transform = function (chunk, encoding, cb) {
   cb(null, chunk);
 };
-},{"./_stream_transform":21,"core-util-is":10,"inherits":12}],20:[function(require,module,exports){
+},{"./_stream_transform":26,"core-util-is":15,"inherits":17}],25:[function(require,module,exports){
 (function (process,global){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -9731,7 +10066,7 @@ function indexOf(xs, x) {
   return -1;
 }
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./_stream_duplex":18,"./internal/streams/BufferList":23,"./internal/streams/destroy":24,"./internal/streams/stream":25,"_process":16,"core-util-is":10,"events":7,"inherits":12,"isarray":14,"process-nextick-args":15,"safe-buffer":31,"string_decoder/":26,"util":6}],21:[function(require,module,exports){
+},{"./_stream_duplex":23,"./internal/streams/BufferList":28,"./internal/streams/destroy":29,"./internal/streams/stream":30,"_process":21,"core-util-is":15,"events":12,"inherits":17,"isarray":19,"process-nextick-args":20,"safe-buffer":36,"string_decoder/":31,"util":11}],26:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -9946,7 +10281,7 @@ function done(stream, er, data) {
 
   return stream.push(null);
 }
-},{"./_stream_duplex":18,"core-util-is":10,"inherits":12}],22:[function(require,module,exports){
+},{"./_stream_duplex":23,"core-util-is":15,"inherits":17}],27:[function(require,module,exports){
 (function (process,global){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -10626,7 +10961,7 @@ Writable.prototype._destroy = function (err, cb) {
   cb(err);
 };
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./_stream_duplex":18,"./internal/streams/destroy":24,"./internal/streams/stream":25,"_process":16,"core-util-is":10,"inherits":12,"process-nextick-args":15,"safe-buffer":31,"util-deprecate":33}],23:[function(require,module,exports){
+},{"./_stream_duplex":23,"./internal/streams/destroy":29,"./internal/streams/stream":30,"_process":21,"core-util-is":15,"inherits":17,"process-nextick-args":20,"safe-buffer":36,"util-deprecate":38}],28:[function(require,module,exports){
 'use strict';
 
 function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
@@ -10706,7 +11041,7 @@ if (util && util.inspect && util.inspect.custom) {
     return this.constructor.name + ' ' + obj;
   };
 }
-},{"safe-buffer":31,"util":6}],24:[function(require,module,exports){
+},{"safe-buffer":36,"util":11}],29:[function(require,module,exports){
 'use strict';
 
 /*<replacement>*/
@@ -10781,10 +11116,10 @@ module.exports = {
   destroy: destroy,
   undestroy: undestroy
 };
-},{"process-nextick-args":15}],25:[function(require,module,exports){
+},{"process-nextick-args":20}],30:[function(require,module,exports){
 module.exports = require('events').EventEmitter;
 
-},{"events":7}],26:[function(require,module,exports){
+},{"events":12}],31:[function(require,module,exports){
 'use strict';
 
 var Buffer = require('safe-buffer').Buffer;
@@ -11057,10 +11392,10 @@ function simpleWrite(buf) {
 function simpleEnd(buf) {
   return buf && buf.length ? this.write(buf) : '';
 }
-},{"safe-buffer":31}],27:[function(require,module,exports){
+},{"safe-buffer":36}],32:[function(require,module,exports){
 module.exports = require('./readable').PassThrough
 
-},{"./readable":28}],28:[function(require,module,exports){
+},{"./readable":33}],33:[function(require,module,exports){
 exports = module.exports = require('./lib/_stream_readable.js');
 exports.Stream = exports;
 exports.Readable = exports;
@@ -11069,13 +11404,13 @@ exports.Duplex = require('./lib/_stream_duplex.js');
 exports.Transform = require('./lib/_stream_transform.js');
 exports.PassThrough = require('./lib/_stream_passthrough.js');
 
-},{"./lib/_stream_duplex.js":18,"./lib/_stream_passthrough.js":19,"./lib/_stream_readable.js":20,"./lib/_stream_transform.js":21,"./lib/_stream_writable.js":22}],29:[function(require,module,exports){
+},{"./lib/_stream_duplex.js":23,"./lib/_stream_passthrough.js":24,"./lib/_stream_readable.js":25,"./lib/_stream_transform.js":26,"./lib/_stream_writable.js":27}],34:[function(require,module,exports){
 module.exports = require('./readable').Transform
 
-},{"./readable":28}],30:[function(require,module,exports){
+},{"./readable":33}],35:[function(require,module,exports){
 module.exports = require('./lib/_stream_writable.js');
 
-},{"./lib/_stream_writable.js":22}],31:[function(require,module,exports){
+},{"./lib/_stream_writable.js":27}],36:[function(require,module,exports){
 /* eslint-disable node/no-deprecated-api */
 var buffer = require('buffer')
 var Buffer = buffer.Buffer
@@ -11139,7 +11474,7 @@ SafeBuffer.allocUnsafeSlow = function (size) {
   return buffer.SlowBuffer(size)
 }
 
-},{"buffer":9}],32:[function(require,module,exports){
+},{"buffer":14}],37:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -11268,7 +11603,7 @@ Stream.prototype.pipe = function(dest, options) {
   return dest;
 };
 
-},{"events":7,"inherits":12,"readable-stream/duplex.js":17,"readable-stream/passthrough.js":27,"readable-stream/readable.js":28,"readable-stream/transform.js":29,"readable-stream/writable.js":30}],33:[function(require,module,exports){
+},{"events":12,"inherits":17,"readable-stream/duplex.js":22,"readable-stream/passthrough.js":32,"readable-stream/readable.js":33,"readable-stream/transform.js":34,"readable-stream/writable.js":35}],38:[function(require,module,exports){
 (function (global){
 
 /**
@@ -11339,16 +11674,16 @@ function config (name) {
 }
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],34:[function(require,module,exports){
-arguments[4][12][0].apply(exports,arguments)
-},{"dup":12}],35:[function(require,module,exports){
+},{}],39:[function(require,module,exports){
+arguments[4][17][0].apply(exports,arguments)
+},{"dup":17}],40:[function(require,module,exports){
 module.exports = function isBuffer(arg) {
   return arg && typeof arg === 'object'
     && typeof arg.copy === 'function'
     && typeof arg.fill === 'function'
     && typeof arg.readUInt8 === 'function';
 }
-},{}],36:[function(require,module,exports){
+},{}],41:[function(require,module,exports){
 (function (process,global){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -11938,5 +12273,5 @@ function hasOwnProperty(obj, prop) {
 }
 
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./support/isBuffer":35,"_process":16,"inherits":34}]},{},[1])(1)
+},{"./support/isBuffer":40,"_process":21,"inherits":39}]},{},[3])(3)
 });
